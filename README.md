@@ -1,60 +1,57 @@
-Context Engine Implementation Plan (Task 2.10 - 2.12)
-Goal
-Implement the Context Engine to provide LLM agents with self-contained, dependency-aware context windows. This enables "Correct-by-Construction" agentic workflows.
+2. No async (v1) — limits scalable I/O
+Problem: A web server handling 10k concurrent connections can't do that with blocking I/O. No async/await means no efficient concurrency.
 
-Current State Review
-Parser & HIR: Robust, supports Generics, Effects, and Tests.
-Type Checker: Resolves names, types, and verifies effects.
-Dependency Graph: Can traverse forward (Call graph) and reverse (Impact analysis).
-Implementation Plan
-Phase 1: Core Engine (crates/context)
-[NEW] crates/context
-A new crate that orchestrates the compiler frontend to extract context.
+Severity: High for production servers. An API that blocks on every database call won't scale past toy demos.
 
-ContextEngine Struct
-pub struct ContextEngine {
-    // Shared compiler state
-    hir: HirProgram,
-    deps: DependencyGraph,
-    source_map: SourceMap, 
-}
-ContextView Struct (The Output)
-pub struct ContextView {
-    pub target: ContextItem,
-    pub dependencies: Vec<ContextItem>, // Depth 1..N
-    pub dependents: Vec<ContextItem>,   // Reverse dependencies
-}
-pub struct ContextItem {
-    pub signature: String,
-    pub contracts: Vec<String>,
-    pub body: Option<String>, // Omitted if depth > 1
-    pub docs: String,
-}
-Phase 2: CLI Integration (pzero context)
-[MODIFY] crates/driver (CLI)
-Add context subcommand.
-Usage: pzero context <symbol_name> [--depth N] [--format json|source]
-Logic
-Resolve: Locate the 
-HId
- for the given symbol name.
-Traverse:
-Forward: Use DependencyGraph::forward to find callees/types.
-Reverse: Use DependencyGraph::reverse if --dependents flag is set.
-Extract:
-Reconstruct source code from Spans (using SourceMap or reading files).
-Filter body implementation for items at Depth > 0 (to save tokens).
-Format:
-Source: Join items into a single valid PZero file (commented).
-JSON: Structured data for tooling.
-Phase 3: RLM Integration (Knowledge Base)
-Integrate pzero_knowledge to augment the context with relevant documentation (e.g., if code uses Result<T>, include 
-kb/types/primitives.md
-).
-Verification Plan
-Manual Verification
-Create a sample project with a call chain: A -> B -> C.
-Run pzero context A -> Should show A (full) + B (sig) + C (sig).
-Run pzero context C --dependents -> Should show B and A.
-Automated Tests
-test_context_extraction: Build a mock HIR, request context, assert specific items are present/absent in ContextView.
+Mitigation planned: Phase 5.4 (concurrency primitives via effects). The plan says "add later via tokio codegen if needed."
+
+Opinion: This is the biggest gap for real-world usage. If someone writes a PZero web backend and deploys it, it blocks on every I/O call. You should consider moving basic async support earlier (Phase 3 or 3.5) rather than Phase 5. Even a simple effect fn that generates tokio::spawn + .await would unblock production use cases.
+
+
+
+
+4. No interop / FFI
+Problem: The plan has no mechanism for calling existing Rust crates, C libraries, or system APIs directly from PZero. Everything goes through effect fn which the codegen must know about.
+
+Severity: High for ecosystem integration. Users can't use reqwest for HTTP, sqlx for databases, serde for JSON, etc. — unless the codegen explicitly supports each one. This makes PZero a walled garden.
+
+Mitigation: Not explicitly addressed. The plan mentions "Access to cargo ecosystem" as a benefit of targeting Rust but doesn't define how PZero code calls into cargo crates.
+
+Opinion: This needs a plan. Even a minimal FFI — extern fn that maps to a Rust function in a companion crate — would unlock the entire cargo ecosystem. Without it, you must build every integration (HTTP, DB, file system, JSON, etc.) as PZero stdlib, which is enormous work.
+
+5. No traits/interfaces yet — limits abstraction
+Problem: You can't write generic code over "any type that supports X". No Serializable, no Comparable, no Display. Every function must work with concrete types.
+
+Severity: Medium. For specific applications it's fine. For building reusable libraries, it's a blocker. You can't write a generic sort that works on any orderable type.
+
+Mitigation planned: The codegen table says "Traits: Used for PZero interfaces/typeclasses" but there's no Phase task that implements trait/interface syntax and codegen. It's a gap in the plan.
+
+
+
+Yes, interfaces as first-class objects in PZero = traits in Rust. They're the same concept with different names.
+
+When you discussed defining interfaces so complex structures can be "captured and known by the LLM" — that's exactly what Rust calls traits. The codegen table already confirms this mapping:
+
+Traits: Used for PZero interfaces/typeclasses.
+
+So the concept exists in the plan. What's missing is:
+
+No PZero syntax defined yet — What does an interface declaration look like in PZero source?
+No Phase task to implement it — There's no "2.X: Implement interface resolution" or "3.X: Codegen for interfaces"
+No codegen mapping documented — How does a PZero interface become Rust code?
+Here's what the mapping would look like end-to-end:
+
+Codegen to Rust:
+
+Since you've already designed interfaces as first-class, the concern from my review is resolved — you just need to make sure there's an explicit task in the Phase plan for:
+
+Parser/AST: Parse interface declarations and implements clauses
+Type checker: Verify that types satisfy interface requirements
+Codegen: Emit Rust trait + impl blocks
+If those are already covered in your Phase 2 implementation (even if the code wasn't visible to me), then you're in good shape. The only nuance: this is where where clauses may enter the generated Rust — if a function takes <T: Serializable + Comparable>, the codegen needs to emit that bound. Worth confirming your string-template codegen handles it, but it's straightforward: fn save<T: Serializable + Clone>(item: T) is a simple format string.
+
+
+
+Move async/concurrency earlier (Phase 3 or 3.5) — without it, any server-side PZero code is a toy demo
+Add a minimal FFI/extern mechanism (Phase 3) — without it, users can't access the cargo ecosystem you chose Rust specifically to get
+
